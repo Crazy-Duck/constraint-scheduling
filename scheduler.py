@@ -13,35 +13,33 @@ def solve_schedule(
 ):
     model = cp_model.CpModel()
 
-    shifts = [0, 1]
+    shifts = [0, 1]  # 0 = morning, 1 = afternoon
 
-    # ------------------------
+    # ============================================================
     # Decision variables
-    # ------------------------
+    # ============================================================
     x = {}
     for a in range(num_agents):
         for d in range(num_days):
             for s in shifts:
                 x[(a, d, s)] = model.NewBoolVar(f"x_a{a}_d{d}_s{s}")
 
-    # ------------------------
-    # Coverage (HARD)
-    # ------------------------
+    # ============================================================
+    # HARD CONSTRAINTS
+    # ============================================================
+
+    # Coverage
     for d in range(num_days):
         model.Add(sum(x[(a, d, 0)] for a in range(num_agents)) == m)
         model.Add(sum(x[(a, d, 1)] for a in range(num_agents)) == n)
 
-    # ------------------------
-    # Days off (HARD)
-    # ------------------------
+    # Days off
     for a in range(num_agents):
         for d in days_off[a]:
             for s in shifts:
                 model.Add(x[(a, d, s)] == 0)
 
-    # ------------------------
-    # Daily limits (HARD)
-    # ------------------------
+    # Daily limits
     for a in range(num_agents):
         for d in range(num_days):
             if not wants_double[a]:
@@ -49,9 +47,9 @@ def solve_schedule(
             else:
                 model.Add(x[(a, d, 0)] + x[(a, d, 1)] <= 2)
 
-    # ------------------------
-    # Actual shifts
-    # ------------------------
+    # ============================================================
+    # ACTUAL SHIFT COUNTS
+    # ============================================================
     actual_m = {}
     actual_a = {}
 
@@ -59,9 +57,9 @@ def solve_schedule(
         actual_m[a] = sum(x[(a, d, 0)] for d in range(num_days))
         actual_a[a] = sum(x[(a, d, 1)] for d in range(num_days))
 
-    # ------------------------
-    # Deviations
-    # ------------------------
+    # ============================================================
+    # DEVIATIONS (fairness)
+    # ============================================================
     dev_m = {}
     dev_a = {}
     max_dev = model.NewIntVar(0, num_days, "max_dev")
@@ -81,9 +79,9 @@ def solve_schedule(
 
     total_deviation = sum(dev_m[a] + dev_a[a] for a in range(num_agents))
 
-    # ------------------------
-    # Double shifts
-    # ------------------------
+    # ============================================================
+    # DOUBLE SHIFT VARIABLES
+    # ============================================================
     double_shift = {}
     for a in range(num_agents):
         for d in range(num_days):
@@ -92,9 +90,9 @@ def solve_schedule(
             model.Add(x[(a, d, 0)] + x[(a, d, 1)] == 2).OnlyEnforceIf(double_shift[(a, d)])
             model.Add(x[(a, d, 0)] + x[(a, d, 1)] <= 1).OnlyEnforceIf(double_shift[(a, d)].Not())
 
-    # ------------------------
-    # Preference terms
-    # ------------------------
+    # ============================================================
+    # PREFERENCES
+    # ============================================================
     penalty_terms = []
     reward_terms = []
 
@@ -109,9 +107,34 @@ def solve_schedule(
     total_reward = sum(reward_terms)
 
     # ============================================================
+    # WORK INDICATOR (for spread objective)
+    # ============================================================
+    work = {}
+    for a in range(num_agents):
+        for d in range(num_days):
+            work[(a, d)] = model.NewBoolVar(f"work_a{a}_d{d}")
+
+            model.Add(work[(a, d)] >= x[(a, d, 0)])
+            model.Add(work[(a, d)] >= x[(a, d, 1)])
+            model.Add(work[(a, d)] <= x[(a, d, 0)] + x[(a, d, 1)])
+
+    consecutive_work = []
+    for a in range(num_agents):
+        for d in range(num_days - 1):
+            c = model.NewBoolVar(f"consec_a{a}_d{d}")
+
+            model.AddBoolAnd([work[(a, d)], work[(a, d + 1)]]).OnlyEnforceIf(c)
+            model.AddBoolOr([work[(a, d)].Not(), work[(a, d + 1)].Not()]).OnlyEnforceIf(c.Not())
+
+            consecutive_work.append(c)
+
+    total_consecutive = sum(consecutive_work)
+
+    # ============================================================
     # PHASE 1: minimize max deviation
     # ============================================================
     model.Minimize(max_dev)
+
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 10
 
@@ -135,7 +158,7 @@ def solve_schedule(
     best_total_dev = solver.Value(total_deviation)
 
     # ============================================================
-    # PHASE 3: minimize penalties
+    # PHASE 3: minimize unwanted double shifts
     # ============================================================
     model.Add(total_deviation == best_total_dev)
     model.Minimize(total_penalty)
@@ -149,7 +172,7 @@ def solve_schedule(
     best_penalty = solver.Value(total_penalty)
 
     # ============================================================
-    # PHASE 4: maximize desired double shifts (LOWEST priority)
+    # PHASE 4: maximize desired double shifts
     # ============================================================
     model.Add(total_penalty == best_penalty)
     model.Maximize(total_reward)
@@ -160,9 +183,23 @@ def solve_schedule(
     if solver.Solve(model) not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return None
 
-    # ------------------------
-    # Extract solution
-    # ------------------------
+    best_reward = solver.Value(total_reward)
+
+    # ============================================================
+    # PHASE 5: minimize consecutive working days (SPREAD OBJECTIVE)
+    # ============================================================
+    model.Add(total_reward == best_reward)
+    model.Minimize(total_consecutive)
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 10
+
+    if solver.Solve(model) not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return None
+
+    # ============================================================
+    # EXTRACT SOLUTION
+    # ============================================================
     schedule = {}
     for a in range(num_agents):
         schedule[a] = []
@@ -179,6 +216,7 @@ def solve_schedule(
         "total_deviation": solver.Value(total_deviation),
         "preference_penalty": solver.Value(total_penalty),
         "preferred_double_shifts": solver.Value(total_reward),
+        "consecutive_work_penalty": solver.Value(total_consecutive),
     }
 
 def print_schedule(
@@ -275,6 +313,7 @@ def print_schedule(
     print(f"- Total deviation: {result.get('total_deviation', '?')}")
     print(f"- Preference penalty: {result.get('preference_penalty', '?')}")
     print(f"- Preference reward: {result.get('preferred_double_shifts', '?')}")
+    print(f"- Consecutive work penalty: {result.get('consecutive_work_penalty', '?')}")
 
 
 # Example usage
