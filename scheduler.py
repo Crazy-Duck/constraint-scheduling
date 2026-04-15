@@ -226,8 +226,8 @@ def print_schedule(result, num_agents, num_days, shifts_required):
 
 # Example usage
 if __name__ == "__main__":
-    num_agents = 8
-    num_days = 5
+    num_agents = 38
+    num_days = 37
     m = 4  # morning shifts per day
     n = 2  # afternoon shifts per day
 
