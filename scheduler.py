@@ -1,7 +1,16 @@
 from ortools.sat.python import cp_model
 
 
-def solve_schedule(num_agents, num_days, m, n, days_off, shifts_required, wants_double):
+def solve_schedule(
+    num_agents,
+    num_days,
+    m,
+    n,
+    days_off,
+    morning_required,
+    afternoon_required,
+    wants_double,
+):
     model = cp_model.CpModel()
 
     shifts = [0, 1]  # 0 = morning, 1 = afternoon
@@ -41,27 +50,39 @@ def solve_schedule(num_agents, num_days, m, n, days_off, shifts_required, wants_
                 model.Add(x[(a, d, 0)] + x[(a, d, 1)] <= 2)
 
     # ------------------------
-    # Actual shifts
+    # Actual shifts per type
     # ------------------------
-    actual_shifts = {}
-    for a in range(num_agents):
-        actual_shifts[a] = sum(x[(a, d, s)] for d in range(num_days) for s in shifts)
-
-    # ------------------------
-    # Deviation (SOFT)
-    # ------------------------
-    deviation = {}
-    max_dev = model.NewIntVar(0, num_days * 2, "max_dev")
+    actual_morning = {}
+    actual_afternoon = {}
 
     for a in range(num_agents):
-        deviation[a] = model.NewIntVar(0, num_days * 2, f"dev_a{a}")
+        actual_morning[a] = sum(x[(a, d, 0)] for d in range(num_days))
+        actual_afternoon[a] = sum(x[(a, d, 1)] for d in range(num_days))
 
-        model.Add(deviation[a] >= actual_shifts[a] - shifts_required[a])
-        model.Add(deviation[a] >= shifts_required[a] - actual_shifts[a])
+    # ------------------------
+    # Deviation (SOFT, per shift type)
+    # ------------------------
+    dev_m = {}
+    dev_a = {}
 
-        model.Add(deviation[a] <= max_dev)
+    max_dev = model.NewIntVar(0, num_days, "max_dev")
 
-    total_deviation = sum(deviation[a] for a in range(num_agents))
+    for a in range(num_agents):
+        # Morning deviation
+        dev_m[a] = model.NewIntVar(0, num_days, f"dev_m_a{a}")
+        model.Add(dev_m[a] >= actual_morning[a] - morning_required[a])
+        model.Add(dev_m[a] >= morning_required[a] - actual_morning[a])
+
+        # Afternoon deviation
+        dev_a[a] = model.NewIntVar(0, num_days, f"dev_a_a{a}")
+        model.Add(dev_a[a] >= actual_afternoon[a] - afternoon_required[a])
+        model.Add(dev_a[a] >= afternoon_required[a] - actual_afternoon[a])
+
+        # Link to max deviation
+        model.Add(dev_m[a] <= max_dev)
+        model.Add(dev_a[a] <= max_dev)
+
+    total_deviation = sum(dev_m[a] + dev_a[a] for a in range(num_agents))
 
     # ------------------------
     # Double shift indicators
@@ -148,7 +169,13 @@ def solve_schedule(num_agents, num_days, m, n, days_off, shifts_required, wants_
         "preference_penalty": solver.Value(total_penalty),
     }
 
-def print_schedule(result, num_agents, num_days, shifts_required):
+def print_schedule(
+    result,
+    num_agents,
+    num_days,
+    morning_required,
+    afternoon_required
+):
     if result is None:
         print("No feasible solution found.")
         return
@@ -156,19 +183,13 @@ def print_schedule(result, num_agents, num_days, shifts_required):
     schedule = result["schedule"]
 
     # ------------------------
-    # TABLE HEADER
+    # SCHEDULE TABLE
     # ------------------------
     headers = ["Day"] + [f"A{a}" for a in range(num_agents)] + ["M_count", "A_count"]
-    header_row = "| " + " | ".join(headers) + " |"
-    separator = "| " + " | ".join(["---"] * len(headers)) + " |"
-
     print("\n## Schedule\n")
-    print(header_row)
-    print(separator)
+    print("| " + " | ".join(headers) + " |")
+    print("| " + " | ".join(["---"] * len(headers)) + " |")
 
-    # ------------------------
-    # TABLE BODY
-    # ------------------------
     for d in range(num_days):
         row = [str(d)]
         morning_count = 0
@@ -200,23 +221,42 @@ def print_schedule(result, num_agents, num_days, shifts_required):
         print("| " + " | ".join(row) + " |")
 
     # ------------------------
-    # AGENT SUMMARY
+    # AGENT SUMMARY (NEW STRUCTURE)
     # ------------------------
     print("\n## Agent Summary\n")
 
-    headers = ["Agent", "Assigned", "Required", "Difference"]
+    headers = [
+        "Agent",
+        "M_assigned",
+        "M_required",
+        "M_diff",
+        "A_assigned",
+        "A_required",
+        "A_diff",
+        "Total_assigned"
+    ]
     print("| " + " | ".join(headers) + " |")
     print("| " + " | ".join(["---"] * len(headers)) + " |")
 
     for a in range(num_agents):
-        total = sum(len(schedule[a][d]) for d in range(num_days))
-        required = shifts_required[a]
-        diff = total - required
+        m_assigned = sum(1 for d in range(num_days) if 0 in schedule[a][d])
+        a_assigned = sum(1 for d in range(num_days) if 1 in schedule[a][d])
 
-        print(f"| A{a} | {total} | {required} | {diff} |")
+        m_req = morning_required[a]
+        a_req = afternoon_required[a]
+
+        m_diff = m_assigned - m_req
+        a_diff = a_assigned - a_req
+
+        total = m_assigned + a_assigned
+
+        print(
+            f"| A{a} | {m_assigned} | {m_req} | {m_diff} | "
+            f"{a_assigned} | {a_req} | {a_diff} | {total} |"
+        )
 
     # ------------------------
-    # GLOBAL METRICS
+    # METRICS
     # ------------------------
     print("\n## Metrics\n")
     print(f"- Max deviation: {result.get('max_deviation', '?')}")
@@ -274,45 +314,85 @@ if __name__ == "__main__":
     }
 
     # Required number of shifts per agent
-    shifts_required = {
-        0: 6,
-        1: 6,
-        2: 6,
-        3: 6,
-        4: 6,
+    morning_required = {
+        0: 0,
+        1: 5,
+        2: 5,
+        3: 5,
+        4: 0,
         5: 6,
         6: 6,
-        7: 6,
-        8: 6,
+        7: 5,
+        8: 4,
         9: 4,
-        10: 6,
-        11: 8,
-        12: 8,
-        13: 8,
-        14: 8,
-        15: 8,
-        16: 8,
+        10: 3,
+        11: 4,
+        12: 6,
+        13: 6,
+        14: 5,
+        15: 5,
+        16: 6,
         17: 4,
         18: 4,
         19: 2,
-        20: 8,
+        20: 4,
         21: 1,
         22: 3,
-        23: 5,
-        24: 4,
-        25: 7,
+        23: 2,
+        24: 2,
+        25: 2,
         26: 4,
-        27: 4,
+        27: 1,
         28: 4,
-        29: 6,
-        30: 6,
-        31: 9,
-        32: 6,
-        33: 6,
-        34: 6,
-        35: 6,
-        36: 6,
-        37: 9,
+        29: 4,
+        30: 4,
+        31: 6,
+        32: 4,
+        33: 4,
+        34: 4,
+        35: 4,
+        36: 4,
+        37: 6,
+    }
+    afternoon_required = {
+        0: 6,
+        1: 1,
+        2: 1,
+        3: 1,
+        4: 6,
+        5: 0,
+        6: 0,
+        7: 1,
+        8: 2,
+        9: 0,
+        10: 3,
+        11: 4,
+        12: 2,
+        13: 2,
+        14: 3,
+        15: 3,
+        16: 2,
+        17: 0,
+        18: 0,
+        19: 0,
+        20: 4,
+        21: 0,
+        22: 0,
+        23: 3,
+        24: 2,
+        25: 5,
+        26: 0,
+        27: 3,
+        28: 0,
+        29: 2,
+        30: 2,
+        31: 3,
+        32: 2,
+        33: 2,
+        34: 2,
+        35: 2,
+        36: 2,
+        37: 3,
     }
 
     # Wants double shifts
@@ -363,8 +443,9 @@ if __name__ == "__main__":
         m,
         n,
         days_off,
-        shifts_required,
+        morning_required,
+        afternoon_required,
         wants_double
     )
 
-    print_schedule(schedule, num_agents, num_days, shifts_required)
+    print_schedule(schedule, num_agents, num_days, morning_required, afternoon_required)
