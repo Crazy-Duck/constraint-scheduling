@@ -13,7 +13,7 @@ def solve_schedule(
 ):
     model = cp_model.CpModel()
 
-    shifts = [0, 1]  # 0 = morning, 1 = afternoon
+    shifts = [0, 1]
 
     # ------------------------
     # Decision variables
@@ -25,14 +25,14 @@ def solve_schedule(
                 x[(a, d, s)] = model.NewBoolVar(f"x_a{a}_d{d}_s{s}")
 
     # ------------------------
-    # Constraint 1: coverage (HARD)
+    # Coverage (HARD)
     # ------------------------
     for d in range(num_days):
         model.Add(sum(x[(a, d, 0)] for a in range(num_agents)) == m)
         model.Add(sum(x[(a, d, 1)] for a in range(num_agents)) == n)
 
     # ------------------------
-    # Constraint 2: days off (HARD)
+    # Days off (HARD)
     # ------------------------
     for a in range(num_agents):
         for d in days_off[a]:
@@ -40,7 +40,7 @@ def solve_schedule(
                 model.Add(x[(a, d, s)] == 0)
 
     # ------------------------
-    # Constraint 3: daily limits (HARD)
+    # Daily limits (HARD)
     # ------------------------
     for a in range(num_agents):
         for d in range(num_days):
@@ -50,42 +50,39 @@ def solve_schedule(
                 model.Add(x[(a, d, 0)] + x[(a, d, 1)] <= 2)
 
     # ------------------------
-    # Actual shifts per type
+    # Actual shifts
     # ------------------------
-    actual_morning = {}
-    actual_afternoon = {}
+    actual_m = {}
+    actual_a = {}
 
     for a in range(num_agents):
-        actual_morning[a] = sum(x[(a, d, 0)] for d in range(num_days))
-        actual_afternoon[a] = sum(x[(a, d, 1)] for d in range(num_days))
+        actual_m[a] = sum(x[(a, d, 0)] for d in range(num_days))
+        actual_a[a] = sum(x[(a, d, 1)] for d in range(num_days))
 
     # ------------------------
-    # Deviation (SOFT, per shift type)
+    # Deviations
     # ------------------------
     dev_m = {}
     dev_a = {}
-
     max_dev = model.NewIntVar(0, num_days, "max_dev")
 
     for a in range(num_agents):
-        # Morning deviation
         dev_m[a] = model.NewIntVar(0, num_days, f"dev_m_a{a}")
-        model.Add(dev_m[a] >= actual_morning[a] - morning_required[a])
-        model.Add(dev_m[a] >= morning_required[a] - actual_morning[a])
-
-        # Afternoon deviation
         dev_a[a] = model.NewIntVar(0, num_days, f"dev_a_a{a}")
-        model.Add(dev_a[a] >= actual_afternoon[a] - afternoon_required[a])
-        model.Add(dev_a[a] >= afternoon_required[a] - actual_afternoon[a])
 
-        # Link to max deviation
+        model.Add(dev_m[a] >= actual_m[a] - morning_required[a])
+        model.Add(dev_m[a] >= morning_required[a] - actual_m[a])
+
+        model.Add(dev_a[a] >= actual_a[a] - afternoon_required[a])
+        model.Add(dev_a[a] >= afternoon_required[a] - actual_a[a])
+
         model.Add(dev_m[a] <= max_dev)
         model.Add(dev_a[a] <= max_dev)
 
     total_deviation = sum(dev_m[a] + dev_a[a] for a in range(num_agents))
 
     # ------------------------
-    # Double shift indicators
+    # Double shifts
     # ------------------------
     double_shift = {}
     for a in range(num_agents):
@@ -96,27 +93,29 @@ def solve_schedule(
             model.Add(x[(a, d, 0)] + x[(a, d, 1)] <= 1).OnlyEnforceIf(double_shift[(a, d)].Not())
 
     # ------------------------
-    # Preference penalties (SOFT)
+    # Preference terms
     # ------------------------
     penalty_terms = []
+    reward_terms = []
 
     for a in range(num_agents):
         for d in range(num_days):
             if not wants_double[a]:
                 penalty_terms.append(double_shift[(a, d)])
+            else:
+                reward_terms.append(double_shift[(a, d)])
 
     total_penalty = sum(penalty_terms)
+    total_reward = sum(reward_terms)
 
     # ============================================================
     # PHASE 1: minimize max deviation
     # ============================================================
     model.Minimize(max_dev)
-
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 10
 
-    status = solver.Solve(model)
-    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    if solver.Solve(model) not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return None
 
     best_max_dev = solver.Value(max_dev)
@@ -130,14 +129,13 @@ def solve_schedule(
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 10
 
-    status = solver.Solve(model)
-    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    if solver.Solve(model) not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return None
 
     best_total_dev = solver.Value(total_deviation)
 
     # ============================================================
-    # PHASE 3: minimize preference violations
+    # PHASE 3: minimize penalties
     # ============================================================
     model.Add(total_deviation == best_total_dev)
     model.Minimize(total_penalty)
@@ -145,8 +143,21 @@ def solve_schedule(
     solver = cp_model.CpSolver()
     solver.parameters.max_time_in_seconds = 10
 
-    status = solver.Solve(model)
-    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    if solver.Solve(model) not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return None
+
+    best_penalty = solver.Value(total_penalty)
+
+    # ============================================================
+    # PHASE 4: maximize desired double shifts (LOWEST priority)
+    # ============================================================
+    model.Add(total_penalty == best_penalty)
+    model.Maximize(total_reward)
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = 10
+
+    if solver.Solve(model) not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
         return None
 
     # ------------------------
@@ -167,6 +178,7 @@ def solve_schedule(
         "max_deviation": solver.Value(max_dev),
         "total_deviation": solver.Value(total_deviation),
         "preference_penalty": solver.Value(total_penalty),
+        "preferred_double_shifts": solver.Value(total_reward),
     }
 
 def print_schedule(
@@ -262,6 +274,7 @@ def print_schedule(
     print(f"- Max deviation: {result.get('max_deviation', '?')}")
     print(f"- Total deviation: {result.get('total_deviation', '?')}")
     print(f"- Preference penalty: {result.get('preference_penalty', '?')}")
+    print(f"- Preference reward: {result.get('preferred_double_shifts', '?')}")
 
 
 # Example usage
