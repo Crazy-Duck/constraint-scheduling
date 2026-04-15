@@ -318,6 +318,62 @@ def print_schedule(
     print(f"- Preference reward: {result.get('preferred_double_shifts', '?')}")
     print(f"- Spacing violations: {result.get('spacing_violations', '?')}")
 
+def print_slot_expanded_table(result, num_agents, num_days, m, n):
+    if result is None:
+        print("No feasible solution found.")
+        return
+
+    schedule = result["schedule"]
+
+    print("\n## Slot-Based Shift Schedule\n")
+
+    # Build rows: first m = morning slots, next n = afternoon slots
+    header = ["Slot"] + [f"Day {d}" for d in range(num_days)]
+    print("| " + " | ".join(header) + " |")
+    print("| " + " | ".join(["---"] * len(header)) + " |")
+
+    # ------------------------
+    # MORNING SLOTS
+    # ------------------------
+    for i in range(m):
+        row = [f"M{i+1}"]
+
+        for d in range(num_days):
+            assigned_agent = None
+
+            # pick the i-th morning assignment (stable ordering by agent id)
+            count = 0
+            for a in range(num_agents):
+                if 0 in schedule[a][d]:
+                    if count == i:
+                        assigned_agent = f"A{a}"
+                        break
+                    count += 1
+
+            row.append(assigned_agent if assigned_agent is not None else "-")
+
+        print("| " + " | ".join(row) + " |")
+
+    # ------------------------
+    # AFTERNOON SLOTS
+    # ------------------------
+    for i in range(n):
+        row = [f"A{i+1}"]
+
+        for d in range(num_days):
+            assigned_agent = None
+
+            count = 0
+            for a in range(num_agents):
+                if 1 in schedule[a][d]:
+                    if count == i:
+                        assigned_agent = f"A{a}"
+                        break
+                    count += 1
+
+            row.append(assigned_agent if assigned_agent is not None else "-")
+
+        print("| " + " | ".join(row) + " |")
 
 # Example usage
 if __name__ == "__main__":
@@ -503,4 +559,5 @@ if __name__ == "__main__":
         wants_double
     )
 
-    print_schedule(schedule, num_agents, num_days, morning_required, afternoon_required)
+    # print_schedule(schedule, num_agents, num_days, morning_required, afternoon_required)
+    print_slot_expanded_table(schedule, num_agents, num_days, m, n)
