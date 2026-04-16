@@ -10,7 +10,8 @@ def solve_schedule(
     morning_required,
     afternoon_required,
     wants_double,
-    min_gap=2,  # NEW: spacing preference (soft)
+    forbidden_pairs,
+    min_gap=2,
 ):
     model = cp_model.CpModel()
 
@@ -47,6 +48,12 @@ def solve_schedule(
                 model.Add(x[(a, d, 0)] + x[(a, d, 1)] <= 1)
             else:
                 model.Add(x[(a, d, 0)] + x[(a, d, 1)] <= 2)
+    
+    # forbidden pairs
+    for (i, j) in forbidden_pairs:
+        for d in range(num_days):
+            for s in shifts:
+                model.Add(x[(i, d, s)] + x[(j, d, s)] <= 1)
 
     # ============================================================
     # WORK INDICATORS
@@ -387,7 +394,7 @@ if __name__ == "__main__":
         0: [1,5,6,7,16,27,28],
         1: [3,9,11,12,15,20,25,22,23,27,28,29,30,31,32,33,34,35,36],
         2: [3,11,14,15,20,25,30,35],
-        3: [2,3,11,15,18,20,25,30,35],
+        3: [2,3,4,11,15,18,20,25,30,35],
         4: [3,11,15,20,25,30,35],
         5: [0,13,14,15,16,17,18,19,20,21],
         6: [],
@@ -415,7 +422,7 @@ if __name__ == "__main__":
         28: [5,6,7,24,31,32],
         29: [13,14,29],
         30: [1,2,3,4,34,35,36],
-        31: [8,9,10,11,12,13,14,15,16,17,18,19,20,21,29],
+        31: [8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,29],
         32: [2,14,29],
         33: [14,29],
         34: [0,4,5,8,12,16,14,29],
@@ -423,6 +430,9 @@ if __name__ == "__main__":
         36: [14,29],
         37: [1,5,6,8,9,11,12,13,14,29],
     }
+
+    # Agents not allowed to work together
+    forbidden_pairs = [(22, 35)]
 
     # Required number of shifts per agent
     morning_required = {
@@ -556,8 +566,9 @@ if __name__ == "__main__":
         days_off,
         morning_required,
         afternoon_required,
-        wants_double
+        wants_double,
+        forbidden_pairs,
     )
 
-    # print_schedule(schedule, num_agents, num_days, morning_required, afternoon_required)
+    print_schedule(schedule, num_agents, num_days, morning_required, afternoon_required)
     print_slot_expanded_table(schedule, num_agents, num_days, m, n)
